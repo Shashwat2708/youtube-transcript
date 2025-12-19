@@ -8,15 +8,7 @@
   ],
   "routes": [
     {
-      "src": "/health",
-      "dest": "/api/index.py"
-    },
-    {
-      "src": "/transcript/(?<videoId>[^/]+)/list",
-      "dest": "/api/index.py?route=list"
-    },
-    {
-      "src": "/transcript/(?<videoId>[^/]+)",
+      "src": "/(.*)",
       "dest": "/api/index.py"
     }
   ]
