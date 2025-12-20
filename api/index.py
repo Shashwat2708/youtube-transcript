@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 import json
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
@@ -8,14 +9,7 @@ from youtube_transcript_api._errors import (
 )
 
 app = Flask(__name__)
-
-# Enable CORS
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,OPTIONS')
-    return response
+CORS(app)  # Enable CORS for all routes
 
 # Health check endpoint
 @app.route('/health', methods=['GET', 'OPTIONS'])
@@ -150,83 +144,55 @@ def list_transcripts(video_id):
             'videoId': video_id
         }), 500
 
-# Vercel Python handler - simplified version
+# Vercel Python handler
+# Vercel expects a handler function that receives a request object
 def handler(req):
     """
     Vercel serverless function handler
     req is a dict with 'path', 'method', 'headers', 'query', 'body'
     """
-    import io
-    from urllib.parse import urlencode
+    from werkzeug.test import Client
+    from werkzeug.wrappers import Response
     
     # Extract request info
     method = req.get('method', 'GET')
     path = req.get('path', '/')
     query = req.get('query', {})
-    headers = req.get('headers', {})
     
     # Build query string
+    from urllib.parse import urlencode
     query_string = urlencode(query) if query else ''
+    full_path = f"{path}?{query_string}" if query_string else path
     
-    # Create WSGI environ dict
-    environ = {
-        'REQUEST_METHOD': method,
-        'SCRIPT_NAME': '',
-        'PATH_INFO': path,
-        'QUERY_STRING': query_string,
-        'CONTENT_TYPE': headers.get('content-type', ''),
-        'CONTENT_LENGTH': headers.get('content-length', '0'),
-        'SERVER_NAME': 'localhost',
-        'SERVER_PORT': '80',
-        'wsgi.version': (1, 0),
-        'wsgi.url_scheme': 'https',
-        'wsgi.input': io.BytesIO(),
-        'wsgi.errors': io.StringIO(),
-        'wsgi.multithread': False,
-        'wsgi.multiprocess': True,
-        'wsgi.run_once': False,
-    }
+    # Create a test client for Flask
+    client = Client(app, Response)
     
-    # Add HTTP headers
-    for key, value in headers.items():
-        key = key.upper().replace('-', '_')
-        if key not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
-            environ[f'HTTP_{key}'] = value
-    
-    # Create a response object to capture Flask's response
-    response_headers = []
-    response_status = [200]
-    response_body = []
-    
-    def start_response(status, headers):
-        response_status[0] = int(status.split()[0])
-        response_headers.extend(headers)
-    
-    # Call Flask app as WSGI application
     try:
-        response_iter = app(environ, start_response)
-        response_body = [b''.join(response_iter).decode('utf-8')]
+        # Make request to Flask app
+        response = client.open(path=full_path, method=method)
+        
+        # Get response data
+        response_data = response.get_data(as_text=True)
+        response_headers = dict(response.headers)
+        status_code = response.status_code
+        
+        return {
+            'statusCode': status_code,
+            'headers': response_headers,
+            'body': response_data
+        }
     except Exception as e:
         import traceback
+        error_trace = traceback.format_exc()
         print(f'❌ [Handler] Error: {str(e)}')
-        print(f'📚 [Handler] Traceback: {traceback.format_exc()}')
+        print(f'📚 [Handler] Traceback: {error_trace}')
         return {
             'statusCode': 500,
             'headers': {'Content-Type': 'application/json'},
             'body': json.dumps({
                 'success': False,
-                'error': str(e)
+                'error': str(e),
+                'traceback': error_trace
             })
         }
-    
-    # Convert headers to dict
-    headers_dict = {}
-    for header in response_headers:
-        headers_dict[header[0]] = header[1]
-    
-    return {
-        'statusCode': response_status[0],
-        'headers': headers_dict,
-        'body': response_body[0] if response_body else ''
-    }
 
