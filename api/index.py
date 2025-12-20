@@ -1,12 +1,55 @@
 import json
+import os
 import urllib.parse
 from http.server import BaseHTTPRequestHandler
+from requests import Session
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
+    RequestBlocked,
+    IpBlocked,
 )
+
+
+def create_youtube_api():
+    """
+    Create YouTubeTranscriptApi instance with proxy support if configured.
+    Supports proxy via environment variables:
+    - PROXY_URL: Full proxy URL (e.g., http://proxy.example.com:8080)
+    - PROXY_HTTP: HTTP proxy URL
+    - PROXY_HTTPS: HTTPS proxy URL
+    """
+    # Check for proxy configuration
+    proxy_url = os.environ.get('PROXY_URL')
+    proxy_http = os.environ.get('PROXY_HTTP')
+    proxy_https = os.environ.get('PROXY_HTTPS')
+    
+    if proxy_url or proxy_http or proxy_https:
+        # Create a session with proxy configuration
+        session = Session()
+        if proxy_url:
+            # Use same proxy for both HTTP and HTTPS
+            session.proxies = {
+                'http': proxy_url,
+                'https': proxy_url,
+            }
+        else:
+            # Use separate proxies
+            proxies = {}
+            if proxy_http:
+                proxies['http'] = proxy_http
+            if proxy_https:
+                proxies['https'] = proxy_https
+            if proxies:
+                session.proxies = proxies
+        
+        # Create API instance with custom session
+        return YouTubeTranscriptApi(http_client=session)
+    else:
+        # No proxy configured, use default
+        return YouTubeTranscriptApi()
 
 
 class handler(BaseHTTPRequestHandler):
@@ -79,7 +122,7 @@ class handler(BaseHTTPRequestHandler):
             # Handle list transcripts endpoint
             if is_list_endpoint:
                 try:
-                    api = YouTubeTranscriptApi()
+                    api = create_youtube_api()
                     transcript_list = api.list(video_id)
                     available_langs = []
                     
@@ -126,7 +169,7 @@ class handler(BaseHTTPRequestHandler):
             # Handle fetch transcript endpoint
             try:
                 # Try to fetch transcript in requested language (using fetch method as in original server.py)
-                api = YouTubeTranscriptApi()
+                api = create_youtube_api()
                 transcript_result = api.fetch(video_id, languages=[lang])
                 
                 # Convert to list (fetch returns an iterable)
@@ -148,10 +191,24 @@ class handler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(response).encode('utf-8'))
                 return
                 
+            except (RequestBlocked, IpBlocked) as block_error:
+                # Handle IP blocking with helpful error message
+                self.send_response(503)
+                self._send_json_headers(cors_headers)
+                response = {
+                    'success': False,
+                    'error': 'YouTube is blocking requests from this IP address.',
+                    'videoId': video_id,
+                    'details': 'Configure a proxy using PROXY_URL environment variable in Vercel to work around this limitation.',
+                    'solution': 'Set PROXY_URL=http://your-proxy:port in Vercel project settings > Environment Variables'
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+                
             except NoTranscriptFound:
                 # Try to fetch any available transcript
                 try:
-                    api = YouTubeTranscriptApi()
+                    api = create_youtube_api()
                     transcript_result = api.fetch(video_id)
                     transcript_list = list(transcript_result)
                     
