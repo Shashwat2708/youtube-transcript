@@ -1,5 +1,6 @@
 import json
 import urllib.parse
+from http.server import BaseHTTPRequestHandler
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
@@ -7,204 +8,223 @@ from youtube_transcript_api._errors import (
     VideoUnavailable,
 )
 
-def handler(req):
-    """
-    Vercel Python serverless function handler
-    req is a dict with 'path', 'method', 'headers', 'query', 'body'
-    """
-    # CORS headers
-    headers = {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-    }
+
+class handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization')
+        self.end_headers()
     
-    # Handle OPTIONS request
-    method = req.get('method', 'GET')
-    if method == 'OPTIONS':
-        return {
-            'statusCode': 200,
-            'headers': headers,
-            'body': ''
-        }
-    
-    # Parse path
-    path = req.get('path', '/')
-    query = req.get('query', {})
-    
-    # Health check
-    if path == '/health' or path.endswith('/health'):
-        return {
-            'statusCode': 200,
-            'headers': headers,
-            'body': json.dumps({
-                'status': 'ok',
-                'message': 'YouTube Transcript API is running'
-            })
-        }
-    
-    # Extract video ID from path
-    # Path format: /transcript/{videoId} or /transcript/{videoId}/list
-    path_parts = [p for p in path.split('/') if p]
-    
-    if len(path_parts) < 2 or path_parts[0] != 'transcript':
-        return {
-            'statusCode': 404,
-            'headers': headers,
-            'body': json.dumps({
-                'success': False,
-                'error': 'Not Found'
-            })
-        }
-    
-    video_id = path_parts[1]
-    is_list_endpoint = len(path_parts) > 2 and path_parts[2] == 'list'
-    
-    # List transcripts endpoint
-    if is_list_endpoint:
+    def do_GET(self):
+        """Handle GET requests"""
         try:
-            api = YouTubeTranscriptApi()
-            transcript_list = api.list(video_id)
-            available_langs = []
+            # Parse path and query
+            parsed_path = urllib.parse.urlparse(self.path)
+            path = parsed_path.path.strip('/')
+            query_params = urllib.parse.parse_qs(parsed_path.query)
             
-            for transcript in transcript_list:
-                available_langs.append({
-                    'language': transcript.language,
-                    'languageCode': transcript.language_code,
-                    'isGenerated': transcript.is_generated,
-                    'isTranslatable': transcript.is_translatable
-                })
+            # Extract query parameters (take first value if list)
+            lang = query_params.get('lang', ['en'])[0] if query_params.get('lang') else 'en'
             
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
-                    'success': True,
-                    'videoId': video_id,
-                    'availableLanguages': available_langs
-                })
+            # Normalize path
+            path_parts = [p for p in path.split('/') if p]
+            
+            # Set CORS headers
+            cors_headers = {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'GET, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization',
             }
-        except Exception as e:
-            return {
-                'statusCode': 500,
-                'headers': headers,
-                'body': json.dumps({
+            
+            # Health check endpoint
+            if not path_parts or (len(path_parts) == 1 and path_parts[0] == 'health'):
+                self.send_response(200)
+                self._send_json_headers(cors_headers)
+                response = {
+                    'status': 'ok',
+                    'message': 'YouTube Transcript API is running'
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+            
+            # Validate path structure: /transcript/{videoId} or /transcript/{videoId}/list
+            if len(path_parts) < 2 or path_parts[0] != 'transcript':
+                self.send_response(404)
+                self._send_json_headers(cors_headers)
+                response = {
                     'success': False,
-                    'error': str(e),
+                    'error': 'Not Found. Use /transcript/{videoId} or /transcript/{videoId}/list'
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+            
+            video_id = path_parts[1]
+            is_list_endpoint = len(path_parts) > 2 and path_parts[2] == 'list'
+            
+            # Validate video ID
+            if not video_id or len(video_id) < 10:
+                self.send_response(400)
+                self._send_json_headers(cors_headers)
+                response = {
+                    'success': False,
+                    'error': 'Invalid video ID. YouTube video IDs are typically 11 characters.',
                     'videoId': video_id
-                })
-            }
-    
-    # Fetch transcript endpoint
-    lang = query.get('lang', 'en') if isinstance(query.get('lang'), str) else (query.get('lang', ['en'])[0] if query.get('lang') else 'en')
-    
-    print(f'📹 [API] Fetching transcript for video: {video_id}')
-    print(f'📹 [API] Requested language: {lang}')
-    
-    # Validate video ID
-    if not video_id or len(video_id) < 10:
-        return {
-            'statusCode': 400,
-            'headers': headers,
-            'body': json.dumps({
-                'success': False,
-                'error': 'Invalid video ID. YouTube video IDs are typically 11 characters.',
-                'videoId': video_id
-            })
-        }
-    
-    try:
-        # Fetch transcript - try requested language first
-        print(f'📡 [API] Calling YouTubeTranscriptApi.fetch...')
-        api = YouTubeTranscriptApi()
-        transcript_result = api.fetch(video_id, languages=[lang])
-        
-        transcript_list = list(transcript_result)
-        transcript_text = ' '.join([item.text for item in transcript_list])
-        
-        print(f'✅ [API] Successfully fetched transcript: {len(transcript_text)} characters')
-        
-        return {
-            'statusCode': 200,
-            'headers': headers,
-            'body': json.dumps({
-                'success': True,
-                'videoId': video_id,
-                'transcript': transcript_text,
-                'length': len(transcript_text),
-                'snippets': len(transcript_list)
-            })
-        }
-        
-    except NoTranscriptFound as e:
-        print(f'⚠️ [API] No transcript found in {lang}, trying any available language...')
-        try:
-            api = YouTubeTranscriptApi()
-            transcript_result = api.fetch(video_id)
-            transcript_list = list(transcript_result)
-            transcript_text = ' '.join([item.text for item in transcript_list])
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
             
-            print(f'✅ [API] Fetched transcript in alternative language: {len(transcript_text)} characters')
+            # Handle list transcripts endpoint
+            if is_list_endpoint:
+                try:
+                    api = YouTubeTranscriptApi()
+                    transcript_list = api.list(video_id)
+                    available_langs = []
+                    
+                    # transcript_list is iterable (TranscriptList object)
+                    for transcript in transcript_list:
+                        available_langs.append({
+                            'language': transcript.language,
+                            'languageCode': transcript.language_code,
+                            'isGenerated': transcript.is_generated,
+                            'isTranslatable': transcript.is_translatable
+                        })
+                    
+                    self.send_response(200)
+                    self._send_json_headers(cors_headers)
+                    response = {
+                        'success': True,
+                        'videoId': video_id,
+                        'availableLanguages': available_langs
+                    }
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    return
+                    
+                except VideoUnavailable:
+                    self.send_response(404)
+                    self._send_json_headers(cors_headers)
+                    response = {
+                        'success': False,
+                        'error': 'Video is unavailable or does not exist',
+                        'videoId': video_id
+                    }
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    return
+                except Exception as e:
+                    self.send_response(500)
+                    self._send_json_headers(cors_headers)
+                    response = {
+                        'success': False,
+                        'error': str(e),
+                        'videoId': video_id
+                    }
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    return
             
-            return {
-                'statusCode': 200,
-                'headers': headers,
-                'body': json.dumps({
+            # Handle fetch transcript endpoint
+            try:
+                # Try to fetch transcript in requested language (using fetch method as in original server.py)
+                api = YouTubeTranscriptApi()
+                transcript_result = api.fetch(video_id, languages=[lang])
+                
+                # Convert to list (fetch returns an iterable)
+                transcript_list = list(transcript_result)
+                
+                # Extract text (items have .text attribute)
+                transcript_text = ' '.join([item.text for item in transcript_list])
+                
+                self.send_response(200)
+                self._send_json_headers(cors_headers)
+                response = {
                     'success': True,
                     'videoId': video_id,
                     'transcript': transcript_text,
                     'length': len(transcript_text),
                     'snippets': len(transcript_list),
-                    'language': 'auto'
-                })
-            }
-        except Exception as e2:
-            return {
-                'statusCode': 500,
-                'headers': headers,
-                'body': json.dumps({
+                    'language': lang
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+                
+            except NoTranscriptFound:
+                # Try to fetch any available transcript
+                try:
+                    api = YouTubeTranscriptApi()
+                    transcript_result = api.fetch(video_id)
+                    transcript_list = list(transcript_result)
+                    
+                    # Extract text (items have .text attribute)
+                    transcript_text = ' '.join([item.text for item in transcript_list])
+                    
+                    self.send_response(200)
+                    self._send_json_headers(cors_headers)
+                    response = {
+                        'success': True,
+                        'videoId': video_id,
+                        'transcript': transcript_text,
+                        'length': len(transcript_text),
+                        'snippets': len(transcript_list),
+                        'language': 'auto'
+                    }
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    return
+                except Exception as e2:
+                    self.send_response(404)
+                    self._send_json_headers(cors_headers)
+                    response = {
+                        'success': False,
+                        'error': 'No transcript found for this video',
+                        'videoId': video_id,
+                        'details': 'This video may not have captions enabled.'
+                    }
+                    self.wfile.write(json.dumps(response).encode('utf-8'))
+                    return
+                    
+            except TranscriptsDisabled:
+                self.send_response(403)
+                self._send_json_headers(cors_headers)
+                response = {
                     'success': False,
-                    'error': f'No transcript found. Original error: {str(e)}',
-                    'videoId': video_id,
-                    'details': 'This video may not have captions enabled.'
-                })
+                    'error': 'Transcripts are disabled for this video',
+                    'videoId': video_id
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+                
+            except VideoUnavailable:
+                self.send_response(404)
+                self._send_json_headers(cors_headers)
+                response = {
+                    'success': False,
+                    'error': 'Video is unavailable or does not exist',
+                    'videoId': video_id
+                }
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+                return
+                
+        except Exception as e:
+            # Catch any unexpected errors to prevent function crashes
+            self.send_response(500)
+            self._send_json_headers({
+                'Access-Control-Allow-Origin': '*',
+            })
+            response = {
+                'success': False,
+                'error': 'Internal server error',
+                'details': str(e) if str(e) else 'Unknown error'
             }
-            
-    except TranscriptsDisabled:
-        return {
-            'statusCode': 500,
-            'headers': headers,
-            'body': json.dumps({
-                'success': False,
-                'error': 'Transcripts are disabled for this video',
-                'videoId': video_id
-            })
-        }
-        
-    except VideoUnavailable:
-        return {
-            'statusCode': 500,
-            'headers': headers,
-            'body': json.dumps({
-                'success': False,
-                'error': 'Video is unavailable or does not exist',
-                'videoId': video_id
-            })
-        }
-        
-    except Exception as e:
-        print(f'❌ [API] Unexpected error: {str(e)}')
-        import traceback
-        print(f'📚 [API] Traceback: {traceback.format_exc()}')
-        return {
-            'statusCode': 500,
-            'headers': headers,
-            'body': json.dumps({
-                'success': False,
-                'error': str(e),
-                'videoId': video_id,
-                'details': 'Make sure the video has captions enabled and is publicly accessible.'
-            })
-        }
-
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+    
+    def _send_json_headers(self, extra_headers=None):
+        """Send JSON content type and additional headers"""
+        self.send_header('Content-Type', 'application/json')
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
+        self.end_headers()
+    
+    def log_message(self, format, *args):
+        """Suppress default logging to prevent errors in serverless environment"""
+        pass
