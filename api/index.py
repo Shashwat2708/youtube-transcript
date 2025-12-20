@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request
+import json
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
@@ -149,7 +150,83 @@ def list_transcripts(video_id):
             'videoId': video_id
         }), 500
 
-# Vercel serverless function handler
-def handler(request):
-    return app(request.environ, lambda status, headers: None)
+# Vercel Python handler - simplified version
+def handler(req):
+    """
+    Vercel serverless function handler
+    req is a dict with 'path', 'method', 'headers', 'query', 'body'
+    """
+    import io
+    from urllib.parse import urlencode
+    
+    # Extract request info
+    method = req.get('method', 'GET')
+    path = req.get('path', '/')
+    query = req.get('query', {})
+    headers = req.get('headers', {})
+    
+    # Build query string
+    query_string = urlencode(query) if query else ''
+    
+    # Create WSGI environ dict
+    environ = {
+        'REQUEST_METHOD': method,
+        'SCRIPT_NAME': '',
+        'PATH_INFO': path,
+        'QUERY_STRING': query_string,
+        'CONTENT_TYPE': headers.get('content-type', ''),
+        'CONTENT_LENGTH': headers.get('content-length', '0'),
+        'SERVER_NAME': 'localhost',
+        'SERVER_PORT': '80',
+        'wsgi.version': (1, 0),
+        'wsgi.url_scheme': 'https',
+        'wsgi.input': io.BytesIO(),
+        'wsgi.errors': io.StringIO(),
+        'wsgi.multithread': False,
+        'wsgi.multiprocess': True,
+        'wsgi.run_once': False,
+    }
+    
+    # Add HTTP headers
+    for key, value in headers.items():
+        key = key.upper().replace('-', '_')
+        if key not in ('CONTENT_TYPE', 'CONTENT_LENGTH'):
+            environ[f'HTTP_{key}'] = value
+    
+    # Create a response object to capture Flask's response
+    response_headers = []
+    response_status = [200]
+    response_body = []
+    
+    def start_response(status, headers):
+        response_status[0] = int(status.split()[0])
+        response_headers.extend(headers)
+    
+    # Call Flask app as WSGI application
+    try:
+        response_iter = app(environ, start_response)
+        response_body = [b''.join(response_iter).decode('utf-8')]
+    except Exception as e:
+        import traceback
+        print(f'❌ [Handler] Error: {str(e)}')
+        print(f'📚 [Handler] Traceback: {traceback.format_exc()}')
+        return {
+            'statusCode': 500,
+            'headers': {'Content-Type': 'application/json'},
+            'body': json.dumps({
+                'success': False,
+                'error': str(e)
+            })
+        }
+    
+    # Convert headers to dict
+    headers_dict = {}
+    for header in response_headers:
+        headers_dict[header[0]] = header[1]
+    
+    return {
+        'statusCode': response_status[0],
+        'headers': headers_dict,
+        'body': response_body[0] if response_body else ''
+    }
 

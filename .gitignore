@@ -1,7 +1,9 @@
+# Node.js (not used, but ignore if present)
 node_modules/
-.env
-*.log
-.DS_Store
+package-lock.json
+package.json
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -13,4 +15,9 @@ env/
 *.egg-info/
 dist/
 build/
+
+# Environment
+.env
+*.log
+.DS_Store
 
